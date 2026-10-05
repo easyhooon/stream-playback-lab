@@ -3,22 +3,26 @@
 import argparse
 import json
 import mimetypes
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from live_source import LiveSource
+
 
 class LabServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, root):
+    def __init__(self, address, root, live_source=None):
         super().__init__(address, LabHandler)
         self.root = Path(root).resolve()
         self.lock = threading.Lock()
         self.kbps = 0
         self.fail = False
+        self.live_source = live_source
 
     def settings(self):
         with self.lock:
@@ -40,7 +44,7 @@ class LabHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        if self.path != "/control":
+        if self.path not in ("/control", "/live-control"):
             self.respond(404, b'{}')
             return
         try:
@@ -48,6 +52,16 @@ class LabHandler(BaseHTTPRequestHandler):
             if not 0 < size <= 1024:
                 raise ValueError("invalid body size")
             values = json.loads(self.rfile.read(size))
+            if self.path == "/live-control":
+                if self.server.live_source is None:
+                    self.respond(409, b'{"error":"Start server with --live"}')
+                    return
+                if not isinstance(values, dict) or set(values) != {"running"} or type(values["running"]) is not bool:
+                    raise ValueError("running: boolean is required")
+                source = self.server.live_source
+                status = source.start() if values["running"] else source.stop()
+                self.respond(200, json.dumps(status).encode())
+                return
             if not isinstance(values, dict) or set(values) - {"kbps", "fail"}:
                 raise ValueError("only kbps and fail are supported")
             current = self.server.settings()
@@ -63,17 +77,31 @@ class LabHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(urlsplit(self.path).path)
         if path == "/status":
-            self.respond(200, json.dumps(self.server.settings()).encode())
+            status = self.server.settings()
+            if self.server.live_source is not None:
+                status["live"] = self.server.live_source.status()
+            self.respond(200, json.dumps(status).encode())
             return
         target = (self.server.root / path.lstrip("/")).resolve()
-        if not target.is_relative_to(self.server.root) or not target.is_file():
+        if not target.is_relative_to(self.server.root) or target.suffix == ".tmp" or not target.is_file():
             self.respond(404, b'{}')
             return
         if self.server.settings()["fail"]:
             self.respond(503, b'{"error":"injected outage"}')
             print(json.dumps({"event": "request", "path": path, "status": 503}), flush=True)
             return
-        size = target.stat().st_size
+        try:
+            media = target.open("rb")
+        except FileNotFoundError:
+            self.respond(404, b'{}')
+            return
+        # Snapshot a playlist before setting Content-Length: FFmpeg atomically replaces it.
+        if target.suffix == ".m3u8":
+            with media:
+                data = media.read()
+            self.respond(200, data, "application/vnd.apple.mpegurl")
+            return
+        size = os.fstat(media.fileno()).st_size
         content_type = {".m3u8": "application/vnd.apple.mpegurl", ".ts": "video/mp2t"}.get(
             target.suffix, mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         )
@@ -85,7 +113,7 @@ class LabHandler(BaseHTTPRequestHandler):
         started = time.monotonic()
         sent = 0
         try:
-            with target.open("rb") as media:
+            with media:
                 while chunk := media.read(8192):
                     settings = self.server.settings()
                     if settings["fail"]:
@@ -109,16 +137,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1] / ".local/media")
+    parser.add_argument("--live", action="store_true", help="Run an owned synthetic live HLS producer")
     args = parser.parse_args()
-    if not (args.root / "hls/master.m3u8").is_file():
-        parser.error("Run scripts/generate_hls.sh first")
-    server = LabServer(("127.0.0.1", args.port), args.root)
+    if not args.live and not (args.root / "hls/master.m3u8").is_file():
+        parser.error("Run scripts/generate_hls.sh first, or use --live")
+    source = LiveSource(args.root) if args.live else None
+    server = LabServer(("127.0.0.1", args.port), args.root, source)
+    if source is not None:
+        source.start()
     print(f"Loopback HLS: http://127.0.0.1:{args.port}/hls/master.m3u8", flush=True)
+    if source is not None:
+        print(f"Ordinary live HLS: http://127.0.0.1:{args.port}/live/index.m3u8", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if source is not None:
+            source.close()
         server.server_close()
 
 

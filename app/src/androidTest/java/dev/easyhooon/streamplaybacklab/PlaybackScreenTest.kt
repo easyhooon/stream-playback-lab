@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -55,9 +56,28 @@ class PlaybackScreenTest {
         }
         compose.onNodeWithText("Pause").performClick()
         compose.onNodeWithText("+10s").performClick()
-        compose.onNodeWithText("360p").performClick()
+        compose.onNodeWithText("360p").performScrollTo().performClick()
         assertEquals(1, toggles)
         assertEquals(10_000L, delta)
         assertEquals(360, quality)
+    }
+
+    @Test fun liveSourceAndReturnExposeExplicitIntentAndOffset() {
+        var chosen: PlaybackMode? = null
+        var returns = 0
+        compose.setContent {
+            MaterialTheme {
+                PlaybackScreen(PlaybackUiState(mode = PlaybackMode.LIVE, isLive = true,
+                    isDynamic = true, liveOffsetMs = 6_500, durationMs = 12_000),
+                    onTogglePlayback = {}, onSeekBy = {}, onSeekTo = {}, onRetry = {},
+                    onSelectQuality = {}, video = {}, onSelectMode = { chosen = it },
+                    onGoLive = { returns++ })
+            }
+        }
+        compose.onNodeWithText("VOD").performClick()
+        compose.onNodeWithTag("go-live").performScrollTo().performClick()
+        compose.onNodeWithTag("live-offset").performScrollTo().assertIsDisplayed()
+        assertEquals(PlaybackMode.VOD, chosen)
+        assertEquals(1, returns)
     }
 }

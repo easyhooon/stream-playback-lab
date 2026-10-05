@@ -74,8 +74,9 @@ private fun PlaybackRoute() {
     val session = remember(context) { PlaybackSession(context) }
     var savedPosition by rememberSaveable { mutableLongStateOf(0) }
     var savedPlaying by rememberSaveable { mutableStateOf(true) }
+    var savedMode by rememberSaveable { mutableStateOf(PlaybackMode.VOD.name) }
     DisposableEffect(session) {
-        session.start(savedPosition, savedPlaying)
+        session.start(savedPosition, savedPlaying, PlaybackMode.valueOf(savedMode))
         onDispose { session.release() }
     }
     DisposableEffect(owner, session) {
@@ -100,6 +101,8 @@ private fun PlaybackRoute() {
         onSeekTo = session::seekTo,
         onRetry = session::retry,
         onSelectQuality = session::selectQuality,
+        onSelectMode = { session.selectMode(it); savedMode = it.name },
+        onGoLive = session::goLive,
         video = {
             AndroidView(
                 factory = { viewContext -> PlayerView(viewContext).apply {
@@ -123,14 +126,26 @@ fun PlaybackScreen(
     onSelectQuality: (Int?) -> Unit,
     video: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    onSelectMode: (PlaybackMode) -> Unit = {},
+    onGoLive: () -> Unit = {},
 ) {
-    var scrubbing by remember { mutableStateOf<Float?>(null) }
+    var scrubbing by remember(state.mode) { mutableStateOf<Float?>(null) }
     Column(modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState())
         .padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("STREAM PLAYBACK LAB", style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary)
-        Text("Synthetic HLS VOD", style = MaterialTheme.typography.headlineSmall)
-        Text("Local experiment · 360p / 720p · 2s segments", style = MaterialTheme.typography.bodySmall)
+        Text(state.mode.title, style = MaterialTheme.typography.headlineSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlaybackMode.entries.forEach { mode ->
+                FilterChip(selected = state.mode == mode, onClick = { onSelectMode(mode) }, label = { Text(mode.label) })
+            }
+        }
+        Text("Local experiment · 2s segments · ${if (state.mode == PlaybackMode.LIVE) "ordinary live HLS" else "VOD"}",
+            style = MaterialTheme.typography.bodySmall)
+        if (state.mode == PlaybackMode.BUNNY) {
+            Text("Big Buck Bunny · © 2008 Blender Foundation / www.bigbuckbunny.org · CC BY 3.0. Excerpt, resized and re-encoded. License: creativecommons.org/licenses/by/3.0/",
+                style = MaterialTheme.typography.bodySmall)
+        }
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
             video()
             if (state.isLoading) CircularProgressIndicator(Modifier.align(Alignment.Center).testTag("loading"))
@@ -151,9 +166,20 @@ fun PlaybackScreen(
                 Text("−10s")
             }
             Button(onClick = onTogglePlayback, enabled = state.error == null,
-                modifier = Modifier.testTag("play-pause")) { Text(if (state.playWhenReady) "Pause" else "Play") }
+                modifier = Modifier.testTag("play-pause")) {
+                Text(if (state.status == "ENDED") "Replay" else if (state.playWhenReady) "Pause" else "Play")
+            }
             OutlinedButton(onClick = { onSeekBy(10_000) }, enabled = state.durationMs > 0 && state.error == null) {
                 Text("+10s")
+            }
+        }
+        if (state.mode == PlaybackMode.LIVE) {
+            Button(onClick = onGoLive, modifier = Modifier.testTag("go-live")) { Text("Go live") }
+            Text("Live offset: ${state.liveOffsetMs?.let { "%.1fs".format(java.util.Locale.US, it / 1000f) } ?: "—"} · target 6.0s",
+                modifier = Modifier.testTag("live-offset"))
+            Text("Live window: ${clockLabel(state.durationMs)} · dynamic=${state.isDynamic}")
+            state.liveEdgeUnixMs?.let {
+                Text("Window edge UTC: ${java.time.Instant.ofEpochMilli(it)}", style = MaterialTheme.typography.bodySmall)
             }
         }
         state.error?.let { error ->

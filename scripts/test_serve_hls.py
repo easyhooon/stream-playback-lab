@@ -17,6 +17,7 @@ class LabServerTest(unittest.TestCase):
         (root / "hls").mkdir()
         (root / "hls/master.m3u8").write_text("#EXTM3U\n")
         (root / "hls/segment.ts").write_bytes(b"x" * 16000)
+        (root / "hls/private.ts.tmp").write_bytes(b"unpublished")
         self.server = LabServer(("127.0.0.1", 0), root)
         self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.worker.start()
@@ -55,6 +56,13 @@ class LabServerTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(self.url + "/../outside.txt", timeout=5)
         self.assertEqual(error.exception.code, 404)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(self.url + "/hls/private.ts.tmp", timeout=5)
+        self.assertEqual(error.exception.code, 404)
+        request = urllib.request.Request(self.url + "/live-control", b'{"running":true}')
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 409)
         for values in ({"kbps": -1}, {"kbps": True}, {"fail": "true"}, {"port": 8000}):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.control(values)
